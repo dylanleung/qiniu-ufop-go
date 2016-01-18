@@ -6,6 +6,7 @@
 
 ```
 html2pdf
+/url/<string>
 /gray/<int>
 /low/<int>
 /orient/<string>
@@ -21,6 +22,7 @@ html2pdf
 
 |参数名|描述|可选|
 |--------|----------|----------|
+|url|原始资源的访问量链接，需要经过Url安全的Base64编码|必须|
 |gray|目标PDF文件是否使用黑白颜色，可选值`1`或`0`，如果选择黑白，那么生成的PDF文件里面内容都是黑白的|可选|
 |low|目标PDF文件是否选择使用低质量，可选值`1`或`0`，如果选择低质量，那么生成的PDF文件大小会比较小|可选|
 |orient|目标PDF文件的方向，可选值为`Landscape`和`Portrait`，默认为`Portrait`|可选|
