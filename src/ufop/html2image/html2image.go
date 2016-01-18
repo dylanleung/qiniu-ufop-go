@@ -217,7 +217,7 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 
 	//prepare command
 	cmdParams := make([]string, 0)
-	//cmdParams = append(cmdParams, "-q")
+	cmdParams = append(cmdParams, "-q")
 
 	if options.CropH > 0 {
 		cmdParams = append(cmdParams, "--crop-h", fmt.Sprintf("%d", options.CropH))
