@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/qiniu/log"
-	"io"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,8 +69,8 @@ func (this *Html2Imager) InitConfig(jobConf string) (err error) {
 	return
 }
 
-func (this *Html2Imager) parse(cmd string) (options *Html2ImageOptions, err error) {
-	pattern := `^html2image(/croph/\d+|/cropw/\d+|/cropx/\d+|/cropy/\d+|/format/(png|jpg|jpeg)|/height/\d+|/quality/\d+|/width/\d+|/force/[0|1]){0,9}$`
+func (this *Html2Imager) parse(cmd string) (url string, options *Html2ImageOptions, err error) {
+	pattern := `^html2image/url/[0-9a-zA-Z-_=]+(/croph/\d+|/cropw/\d+|/cropx/\d+|/cropy/\d+|/format/(png|jpg|jpeg)|/height/\d+|/quality/\d+|/width/\d+|/force/[0|1]){0,9}$`
 	matched, _ := regexp.MatchString(pattern, cmd)
 	if !matched {
 		err = errors.New("invalid html2image command format")
@@ -81,6 +79,14 @@ func (this *Html2Imager) parse(cmd string) (options *Html2ImageOptions, err erro
 
 	options = &Html2ImageOptions{
 		Format: "jpg",
+	}
+
+	//domain
+	var decodeErr error
+	url, decodeErr = utils.GetParamDecoded(cmd, `url/[0-9a-zA-Z-_=]+`, "url")
+	if decodeErr != nil {
+		err = errors.New("invalid html2image parameter 'url'")
+		return
 	}
 
 	//croph
@@ -188,7 +194,8 @@ func (this *Html2Imager) parse(cmd string) (options *Html2ImageOptions, err erro
 }
 
 func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultType int, contentType string, err error) {
-	options, pErr := this.parse(req.Cmd)
+	reqId := req.ReqId
+	remoteSrcUrl, options, pErr := this.parse(req.Cmd)
 	if pErr != nil {
 		err = pErr
 		return
@@ -206,48 +213,11 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 		return
 	}
 
-	//get page file content save it into temp dir
-	resp, respErr := http.Get(req.Src.Url)
-	if respErr != nil || resp.StatusCode != 200 {
-		if respErr != nil {
-			err = errors.New(fmt.Sprintf("retrieve page file resource data failed, %s", respErr.Error()))
-		} else {
-			err = errors.New(fmt.Sprintf("retrieve page file resource data failed, %s", resp.Status))
-			if resp.Body != nil {
-				resp.Body.Close()
-			}
-		}
-		return
-	}
-
 	jobPrefix := utils.Md5Hex(req.Src.Url)
-
-	pageSuffix := "txt"
-	if strings.HasPrefix(req.Src.MimeType, "text/html") {
-		pageSuffix = "html"
-	}
-
-	localPageTmpFname := fmt.Sprintf("%s%d.page.%s", jobPrefix, time.Now().UnixNano(), pageSuffix)
-	localPageTmpFpath := filepath.Join(os.TempDir(), localPageTmpFname)
-	defer os.Remove(localPageTmpFpath)
-
-	localPageTmpFp, openErr := os.OpenFile(localPageTmpFpath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0655)
-	if openErr != nil {
-		err = errors.New(fmt.Sprintf("open page file temp file failed, %s", openErr.Error()))
-		return
-	}
-	_, cpErr := io.Copy(localPageTmpFp, resp.Body)
-	if cpErr != nil {
-		err = errors.New(fmt.Sprintf("save page file content to tmp file failed, %s", cpErr.Error()))
-		return
-	}
-
-	localPageTmpFp.Close()
-	resp.Body.Close()
 
 	//prepare command
 	cmdParams := make([]string, 0)
-	cmdParams = append(cmdParams, "-q")
+	//cmdParams = append(cmdParams, "-q")
 
 	if options.CropH > 0 {
 		cmdParams = append(cmdParams, "--crop-h", fmt.Sprintf("%d", options.CropH))
@@ -289,10 +259,11 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 	resultTmpFname := fmt.Sprintf("%s%d.result.%s", jobPrefix, time.Now().UnixNano(), options.Format)
 	resultTmpFpath := filepath.Join(os.TempDir(), resultTmpFname)
 
-	cmdParams = append(cmdParams, localPageTmpFpath, resultTmpFpath)
+	cmdParams = append(cmdParams, remoteSrcUrl, resultTmpFpath)
 
 	//cmd
 	convertCmd := exec.Command("wkhtmltoimage", cmdParams...)
+	log.Info(reqId, convertCmd.Path, convertCmd.Args)
 
 	stdErrPipe, pipeErr := convertCmd.StderrPipe()
 	if pipeErr != nil {
@@ -314,7 +285,7 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 
 	//check stderr output & output file
 	if string(stdErrData) != "" {
-		log.Error(string(stdErrData))
+		log.Error(reqId, string(stdErrData))
 	}
 
 	if waitErr := convertCmd.Wait(); waitErr != nil {

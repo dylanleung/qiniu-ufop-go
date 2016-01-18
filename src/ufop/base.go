@@ -13,8 +13,9 @@ const (
 )
 
 type UfopRequest struct {
-	Cmd string         `json:"cmd"`
-	Src UfopRequestSrc `json:"src"`
+	Cmd   string         `json:"cmd"`
+	Src   UfopRequestSrc `json:"src"`
+	ReqId string         `json:"-"`
 }
 
 type UfopRequestSrc struct {

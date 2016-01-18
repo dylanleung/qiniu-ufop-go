@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"ufop/utils"
 )
 
 type UfopServer struct {
@@ -78,13 +79,14 @@ func (this *UfopServer) serveUfop(w http.ResponseWriter, req *http.Request) {
 		writeJsonError(w, 500, "read ufop request body error")
 		return
 	}
-	log.Info(string(ufopReqData))
+	reqId := utils.NewRequestId()
+	log.Info(reqId, string(ufopReqData))
 	err = json.Unmarshal(ufopReqData, &ufopReq)
 	if err != nil {
 		writeJsonError(w, 500, "parse ufop request body error")
 		return
 	}
-
+	ufopReq.ReqId = reqId
 	ufopResult, ufopResultType, ufopResultContentType, err = handleJob(ufopReq, this.cfg.UfopPrefix, this.jobHandlers)
 	if err != nil {
 		ufopErr := UfopError{
@@ -92,7 +94,7 @@ func (this *UfopServer) serveUfop(w http.ResponseWriter, req *http.Request) {
 			Error:   err.Error(),
 		}
 		logBytes, _ := json.Marshal(&ufopErr)
-		log.Error(string(logBytes))
+		log.Error(reqId, string(logBytes))
 		writeJsonError(w, 400, err.Error())
 	} else {
 		switch ufopResultType {
