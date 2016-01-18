@@ -16,6 +16,7 @@ imagecomp
 /format/<string>
 /rows/<int>
 /cols/<int>
+/margin/<int>
 /halign/<string>
 /valign/<string>
 /alpha/<int>

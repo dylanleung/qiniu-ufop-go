@@ -11,7 +11,8 @@ import (
 	"ufop/html2pdf"
 	"ufop/imagecomp"
 	"ufop/mkzip"
-	"ufop/roundpic"
+	"ufop/ossimg"
+	//"ufop/roundpic"
 	"ufop/unzip"
 )
 
@@ -79,7 +80,11 @@ func main() {
 		log.Error(err)
 	}
 
-	if err := ufopServ.RegisterJobHandler("roundpic.conf", &roundpic.RoundPicer{}); err != nil {
+	//if err := ufopServ.RegisterJobHandler("roundpic.conf", &roundpic.RoundPicer{}); err != nil {
+	//	log.Error(err)
+	//}
+
+	if err := ufopServ.RegisterJobHandler("ossimg.conf", &ossimg.OSSImager{}); err != nil {
 		log.Error(err)
 	}
 

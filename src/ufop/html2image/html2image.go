@@ -81,7 +81,7 @@ func (this *Html2Imager) parse(cmd string) (url string, options *Html2ImageOptio
 		Format: "jpg",
 	}
 
-	//domain
+	//url
 	var decodeErr error
 	url, decodeErr = utils.GetParamDecoded(cmd, `url/[0-9a-zA-Z-_=]+`, "url")
 	if decodeErr != nil {
@@ -285,7 +285,7 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 
 	//check stderr output & output file
 	if string(stdErrData) != "" {
-		log.Error(reqId, string(stdErrData))
+		log.Info(reqId, string(stdErrData))
 	}
 
 	if waitErr := convertCmd.Wait(); waitErr != nil {

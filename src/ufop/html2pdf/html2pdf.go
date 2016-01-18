@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/qiniu/log"
-	"io"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,8 +76,8 @@ func (this *Html2Pdfer) InitConfig(jobConf string) (err error) {
 	return
 }
 
-func (this *Html2Pdfer) parse(cmd string) (options *Html2PdfOptions, err error) {
-	pattern := `^html2pdf(/gray/[0|1]|/low/[0|1]|/orient/(Portrait|Landscape)|/size/[A-B][0-8]|/title/[0-9a-zA-Z-_=]+|/collate/[0|1]|/copies/\d+){0,7}$`
+func (this *Html2Pdfer) parse(cmd string) (url string, options *Html2PdfOptions, err error) {
+	pattern := `^html2pdf/url/[0-9a-zA-Z-_=]+(/gray/[0|1]|/low/[0|1]|/orient/(Portrait|Landscape)|/size/[A-B][0-8]|/title/[0-9a-zA-Z-_=]+|/collate/[0|1]|/copies/\d+){0,7}$`
 	matched, _ := regexp.MatchString(pattern, cmd)
 	if !matched {
 		err = errors.New("invalid html2pdf command format")
@@ -88,8 +86,14 @@ func (this *Html2Pdfer) parse(cmd string) (options *Html2PdfOptions, err error) 
 
 	var decodeErr error
 
-	//get optional parameters
+	//url
+	url, decodeErr = utils.GetParamDecoded(cmd, `url/[0-9a-zA-Z-_=]+`, "url")
+	if decodeErr != nil {
+		err = errors.New("invalid html2pdf parameter 'url'")
+		return
+	}
 
+	//get optional parameters
 	options = &Html2PdfOptions{
 		Collate: true,
 		Copies:  1,
@@ -152,7 +156,8 @@ func (this *Html2Pdfer) parse(cmd string) (options *Html2PdfOptions, err error) 
 }
 
 func (this *Html2Pdfer) Do(req ufop.UfopRequest) (result interface{}, resultType int, contentType string, err error) {
-	options, pErr := this.parse(req.Cmd)
+	reqId := req.ReqId
+	remoteSrcUrl, options, pErr := this.parse(req.Cmd)
 	if pErr != nil {
 		err = pErr
 		return
@@ -175,44 +180,7 @@ func (this *Html2Pdfer) Do(req ufop.UfopRequest) (result interface{}, resultType
 		return
 	}
 
-	//get page file content save it into temp dir
-	resp, respErr := http.Get(req.Src.Url)
-	if respErr != nil || resp.StatusCode != 200 {
-		if respErr != nil {
-			err = errors.New(fmt.Sprintf("retrieve page file resource data failed, %s", respErr.Error()))
-		} else {
-			err = errors.New(fmt.Sprintf("retrieve page file resource data failed, %s", resp.Status))
-			if resp.Body != nil {
-				resp.Body.Close()
-			}
-		}
-		return
-	}
-
 	jobPrefix := utils.Md5Hex(req.Src.Url)
-
-	pageSuffix := "txt"
-	if strings.HasPrefix(req.Src.MimeType, "text/html") {
-		pageSuffix = "html"
-	}
-
-	localPageTmpFname := fmt.Sprintf("%s%d.page.%s", jobPrefix, time.Now().UnixNano(), pageSuffix)
-	localPageTmpFpath := filepath.Join(os.TempDir(), localPageTmpFname)
-	defer os.Remove(localPageTmpFpath)
-
-	localPageTmpFp, openErr := os.OpenFile(localPageTmpFpath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0655)
-	if openErr != nil {
-		err = errors.New(fmt.Sprintf("open page file temp file failed, %s", openErr.Error()))
-		return
-	}
-	_, cpErr := io.Copy(localPageTmpFp, resp.Body)
-	if cpErr != nil {
-		err = errors.New(fmt.Sprintf("save page file content to tmp file failed, %s", cpErr.Error()))
-		return
-	}
-
-	localPageTmpFp.Close()
-	resp.Body.Close()
 
 	//prepare command
 	cmdParams := make([]string, 0)
@@ -250,10 +218,11 @@ func (this *Html2Pdfer) Do(req ufop.UfopRequest) (result interface{}, resultType
 	resultTmpFname := fmt.Sprintf("%s%d.result.pdf", jobPrefix, time.Now().UnixNano())
 	resultTmpFpath := filepath.Join(os.TempDir(), resultTmpFname)
 
-	cmdParams = append(cmdParams, localPageTmpFpath, resultTmpFpath)
+	cmdParams = append(cmdParams, remoteSrcUrl, resultTmpFpath)
 
 	//cmd
 	convertCmd := exec.Command("wkhtmltopdf", cmdParams...)
+	log.Info(reqId, convertCmd.Path, convertCmd.Args)
 
 	stdErrPipe, pipeErr := convertCmd.StderrPipe()
 	if pipeErr != nil {
@@ -275,7 +244,7 @@ func (this *Html2Pdfer) Do(req ufop.UfopRequest) (result interface{}, resultType
 
 	//check stderr output & output file
 	if string(stdErrData) != "" {
-		log.Error(string(stdErrData))
+		log.Info(reqId, string(stdErrData))
 	}
 
 	if waitErr := convertCmd.Wait(); waitErr != nil {
