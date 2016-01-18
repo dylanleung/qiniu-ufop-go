@@ -230,13 +230,13 @@ qntest-html2pdf
 ```
 
 ```
-qntest-html2pdf/orient/size/A4/low/1
+qntest-html2pdf/url/aHR0cDovL3FkaXNrLnFpbml1ZG4uY29tL2luZGV4Lmh0bWw=/orient/size/A4/low/1
 ```
 
 持久化的使用方式
 
 ```
-qntest-html2pdf/orient/size/A4/low/1|saveas/aWYtcGJsOnRlc3QucGRm
+qntest-html2pdf/url/aHR0cDovL3FkaXNrLnFpbml1ZG4uY29tL2luZGV4Lmh0bWw=/orient/size/A4/low/1|saveas/aWYtcGJsOnRlc3QucGRm
 ```
 
 其中`aWYtcGJsOnRlc3QucGRm`为目标存储空间和目标图片PDF文件的`Urlsafe Base64编码`。
