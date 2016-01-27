@@ -213,7 +213,7 @@ func (this *Html2Imager) Do(req ufop.UfopRequest) (result interface{}, resultTyp
 		return
 	}
 
-	jobPrefix := utils.Md5Hex(req.Src.Url)
+	jobPrefix := utils.Md5Hex(remoteSrcUrl)
 
 	//prepare command
 	cmdParams := make([]string, 0)

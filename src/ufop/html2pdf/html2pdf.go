@@ -180,7 +180,7 @@ func (this *Html2Pdfer) Do(req ufop.UfopRequest) (result interface{}, resultType
 		return
 	}
 
-	jobPrefix := utils.Md5Hex(req.Src.Url)
+	jobPrefix := utils.Md5Hex(remoteSrcUrl)
 
 	//prepare command
 	cmdParams := make([]string, 0)
