@@ -541,7 +541,7 @@ func (this *ImageComposer) Do(req ufop.UfopRequest) (result interface{}, resultT
 
 	case "image/jpeg":
 		eErr := jpeg.Encode(buffer, dstImage, &jpeg.Options{
-			Quality: 100,
+			Quality: 75,
 		})
 		if eErr != nil {
 			err = errors.New(fmt.Sprintf("create dst jpeg image failed, %s", eErr))
