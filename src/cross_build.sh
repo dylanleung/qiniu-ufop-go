@@ -1,2 +1,2 @@
 export GOPATH=$GOPATH:/Users/jemy/QiniuCloud/Projects/qiniu-ufop-service
-gox -os="linux" -arch="amd64" -output="qufop"
+GOOS=linux GOARCH=amd64 go build qufop.go

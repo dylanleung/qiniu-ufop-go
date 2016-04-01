@@ -143,7 +143,7 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 	}
 
 	//check mimetype
-	if req.Src.MimeType != "application/zip" {
+	if req.Src.MimeType != "application/zip" || req.Src.MimeType == "application/x-zip-compressed" {
 		err = errors.New("unsupported mimetype to unzip")
 		return
 	}
