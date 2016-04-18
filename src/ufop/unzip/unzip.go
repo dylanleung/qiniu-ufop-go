@@ -275,7 +275,6 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 
 		go func() {
 			defer uploadWg.Done()
-			fmt.Println(fileName)
 			if fileSize <= rputThreshold {
 				var fputRet fio.PutRet
 				fErr := fio.Put(nil, &fputRet, uptoken, fileName, unzipReader, nil)
