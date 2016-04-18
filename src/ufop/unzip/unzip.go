@@ -11,11 +11,13 @@ import (
 	fio "github.com/qiniu/api.v6/io"
 	rio "github.com/qiniu/api.v6/resumable/io"
 	"github.com/qiniu/api.v6/rs"
+	"github.com/qiniu/log"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 	"ufop"
 	"ufop/utils"
 	"unicode/utf8"
@@ -25,6 +27,8 @@ const (
 	UNZIP_MAX_ZIP_FILE_LENGTH uint64 = 1 * 1024 * 1024 * 1024
 	UNZIP_MAX_FILE_LENGTH     uint64 = 100 * 1024 * 1024 //100MB
 	UNZIP_MAX_FILE_COUNT      int    = 10                //10
+
+	MAX_UPLOAD_WORKERS = 100
 )
 
 type UnzipResult struct {
@@ -153,6 +157,7 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 		return
 	}
 
+	log.Infof("[%s] downloading file", req.ReqId)
 	//get resource
 	resUrl := req.Src.Url
 	resResp, respErr := http.Get(resUrl)
@@ -175,6 +180,7 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 		return
 	}
 
+	log.Infof("[%s] trying to read zip", req.ReqId)
 	//read zip
 	respReader := bytes.NewReader(respData)
 	zipReader, zipErr := zip.NewReader(respReader, int64(respReader.Len()))
@@ -199,6 +205,7 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 		}
 	}
 
+	log.Infof("[%s] start to upload files", req.ReqId)
 	//set up host
 	conf.UP_HOST = "http://up.qiniu.com"
 	rputSettings := rio.Settings{
@@ -211,9 +218,12 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 		Scope: bucket,
 	}
 	var unzipResult UnzipResult
-	unzipResult.Files = make([]UnzipFile, 0)
+	unzipResult.Files = make([]UnzipFile, 0, 100)
 	var tErr error
 	//iterate the zip file
+	uploadWg := sync.WaitGroup{}
+	resultLock := sync.RWMutex{}
+	uploadCounter := 0
 	for _, zipFile := range zipFiles {
 		fileInfo := zipFile.FileHeader.FileInfo()
 		fileName := zipFile.FileHeader.Name
@@ -253,27 +263,46 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 		uptoken := policy.Token(this.mac)
 		var unzipFile UnzipFile
 		unzipFile.Key = fileName
-		if fileSize <= rputThreshold {
-			var fputRet fio.PutRet
-			fErr := fio.Put(nil, &fputRet, uptoken, fileName, unzipReader, nil)
-			if fErr != nil {
-				unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", fErr.Error())
+
+		//incr counter
+		uploadCounter += 1
+
+		if uploadCounter%MAX_UPLOAD_WORKERS == 0 {
+			uploadWg.Wait()
+		}
+
+		uploadWg.Add(1)
+
+		go func() {
+			defer uploadWg.Done()
+			fmt.Println(fileName)
+			if fileSize <= rputThreshold {
+				var fputRet fio.PutRet
+				fErr := fio.Put(nil, &fputRet, uptoken, fileName, unzipReader, nil)
+				if fErr != nil {
+					unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", fErr.Error())
+				} else {
+					unzipFile.Hash = fputRet.Hash
+				}
+
 			} else {
-				unzipFile.Hash = fputRet.Hash
+				var rputRet rio.PutRet
+				rErr := rio.Put(nil, &rputRet, uptoken, fileName, unzipReader, int64(fileSize), nil)
+				if rErr != nil {
+					unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", rErr.Error())
+				} else {
+					unzipFile.Hash = rputRet.Hash
+				}
 			}
 
-		} else {
-			var rputRet rio.PutRet
-			rErr := rio.Put(nil, &rputRet, uptoken, fileName, unzipReader, int64(fileSize), nil)
-			if rErr != nil {
-				unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", rErr.Error())
-			} else {
-				unzipFile.Hash = rputRet.Hash
-			}
-		}
-		unzipResult.Files = append(unzipResult.Files, unzipFile)
+			resultLock.Lock()
+			unzipResult.Files = append(unzipResult.Files, unzipFile)
+			resultLock.Unlock()
+		}()
 	}
 
+	uploadWg.Wait()
+	log.Infof("[%s] upload files done", req.ReqId)
 	//write result
 	result = unzipResult
 	resultType = ufop.RESULT_TYPE_JSON

@@ -80,7 +80,7 @@ func (this *UfopServer) serveUfop(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	reqId := utils.NewRequestId()
-	log.Info(reqId, string(ufopReqData))
+	log.Infof("[%s] %s", reqId, string(ufopReqData))
 	err = json.Unmarshal(ufopReqData, &ufopReq)
 	if err != nil {
 		writeJsonError(w, 500, "parse ufop request body error")
