@@ -12,12 +12,15 @@ import (
 	rio "github.com/qiniu/api.v6/resumable/io"
 	"github.com/qiniu/api.v6/rs"
 	"github.com/qiniu/log"
+	"github.com/qiniu/rpc"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
-	"sync"
+	"time"
 	"ufop"
 	"ufop/utils"
 	"unicode/utf8"
@@ -27,8 +30,15 @@ const (
 	UNZIP_MAX_ZIP_FILE_LENGTH uint64 = 1 * 1024 * 1024 * 1024
 	UNZIP_MAX_FILE_LENGTH     uint64 = 100 * 1024 * 1024 //100MB
 	UNZIP_MAX_FILE_COUNT      int    = 10                //10
+)
 
-	MAX_UPLOAD_WORKERS = 100
+const (
+	UNZIP_CACHE_ZIP_FILE_THRESHOLD  = 20 * 1024 * 1024 //20MB
+	UNZIP_CACHE_FILE_ITEM_THRESHOLD = 20 * 1024 * 1024 //20MB
+)
+
+const (
+	RESUMABLE_PUT_THRESHOLD = 20 * 1024 * 1024
 )
 
 type UnzipResult struct {
@@ -163,9 +173,9 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 	resResp, respErr := http.Get(resUrl)
 	if respErr != nil || resResp.StatusCode != 200 {
 		if respErr != nil {
-			err = errors.New(fmt.Sprintf("retrieve resource data failed, %s", respErr.Error()))
+			err = fmt.Errorf("retrieve resource data failed, %s", respErr.Error())
 		} else {
-			err = errors.New(fmt.Sprintf("retrieve resource data failed, %s", resResp.Status))
+			err = fmt.Errorf("retrieve resource data failed, %s", resResp.Status)
 			if resResp.Body != nil {
 				resResp.Body.Close()
 			}
@@ -174,20 +184,63 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 	}
 	defer resResp.Body.Close()
 
-	respData, readErr := ioutil.ReadAll(resResp.Body)
-	if readErr != nil {
-		err = errors.New(fmt.Sprintf("read resource data failed, %s", readErr.Error()))
-		return
+	//zip
+	var zipReader *zip.Reader
+	var zipErr error
+	//check the size of the src size file, when exceeds the threshold, use disk cache
+	if req.Src.Fsize > UNZIP_CACHE_ZIP_FILE_THRESHOLD {
+		log.Infof("[%s] trying to read zip into disk", req.ReqId)
+
+		zipFileCacheFname := utils.Md5Hex(fmt.Sprintf("%s:%d", req.Src.Url, time.Now().Unix()))
+		zipFileCacheFpath := filepath.Join(os.TempDir(), zipFileCacheFname)
+		zipFileCacheFh, openErr := os.Create(zipFileCacheFpath)
+		defer os.Remove(zipFileCacheFpath)
+
+		if openErr != nil {
+			err = fmt.Errorf("open local zip cache file failed, %s", openErr.Error())
+			return
+		}
+		_, cpErr := io.Copy(zipFileCacheFh, resResp.Body)
+		if cpErr != nil {
+			err = fmt.Errorf("write local zip cache file failed, %s", cpErr.Error())
+			return
+		}
+		zipFileCacheFh.Close()
+
+		zipFileCacheFh, openErr = os.Open(zipFileCacheFpath)
+		if openErr != nil {
+			err = fmt.Errorf("reopen local zip cache file failed, %s", openErr.Error())
+			return
+		}
+		zipFileCacheStat, statErr := zipFileCacheFh.Stat()
+		if statErr != nil {
+			err = fmt.Errorf("reopen local zip cache file size error, %s", statErr.Error())
+			return
+		}
+		zipReader, zipErr = zip.NewReader(zipFileCacheFh, zipFileCacheStat.Size())
+		if zipErr != nil {
+			err = errors.New(fmt.Sprintf("invalid zip file, %s", zipErr.Error()))
+			return
+		}
+	} else {
+		log.Infof("[%s] trying to read zip into memory", req.ReqId)
+		respData, readErr := ioutil.ReadAll(resResp.Body)
+		if readErr != nil {
+			err = errors.New(fmt.Sprintf("read resource data failed, %s", readErr.Error()))
+			return
+		}
+
+		//read zip
+		respReader := bytes.NewReader(respData)
+		zipReader, zipErr = zip.NewReader(respReader, int64(respReader.Len()))
+		if zipErr != nil {
+			err = errors.New(fmt.Sprintf("invalid zip file, %s", zipErr.Error()))
+			return
+		}
 	}
 
-	log.Infof("[%s] trying to read zip", req.ReqId)
-	//read zip
-	respReader := bytes.NewReader(respData)
-	zipReader, zipErr := zip.NewReader(respReader, int64(respReader.Len()))
-	if zipErr != nil {
-		err = errors.New(fmt.Sprintf("invalid zip file, %s", zipErr.Error()))
-		return
-	}
+	log.Infof("[%s] check and start to unzip", req.ReqId)
+	//iter zip files
 	zipFiles := zipReader.File
 	//check file count
 	zipFileCount := len(zipFiles)
@@ -210,20 +263,19 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 	conf.UP_HOST = "http://up.qiniu.com"
 	rputSettings := rio.Settings{
 		ChunkSize: 4 * 1024 * 1024,
-		Workers:   1,
+		Workers:   8,
 	}
 	rio.SetSettings(&rputSettings)
-	var rputThreshold uint64 = 100 * 1024 * 1024
 	policy := rs.PutPolicy{
 		Scope: bucket,
 	}
+	policy.Expires = 24 * 3600 //24 hours
+
 	var unzipResult UnzipResult
 	unzipResult.Files = make([]UnzipFile, 0, 100)
 	var tErr error
 	//iterate the zip file
-	uploadWg := sync.WaitGroup{}
-	resultLock := sync.RWMutex{}
-	uploadCounter := 0
+
 	for _, zipFile := range zipFiles {
 		fileInfo := zipFile.FileHeader.FileInfo()
 		fileName := zipFile.FileHeader.Name
@@ -241,66 +293,118 @@ func (this *Unzipper) Do(req ufop.UfopRequest) (result interface{}, resultType i
 			continue
 		}
 
+		var unzipFile UnzipFile
+
+		//save file to bucket
+		fileKey := prefix + fileName
+		unzipFile.Key = fileKey
+
+		if overwrite {
+			policy.Scope = bucket + ":" + fileKey
+		}
+
+		uptoken := policy.Token(this.mac)
+
 		zipFileReader, zipErr := zipFile.Open()
 		if zipErr != nil {
 			err = errors.New(fmt.Sprintf("open zip file content failed, %s", zipErr.Error()))
 			return
 		}
-		defer zipFileReader.Close()
 
-		unzipData, unzipErr := ioutil.ReadAll(zipFileReader)
-		if unzipErr != nil {
-			err = errors.New(fmt.Sprintf("unzip the file content failed, %s", unzipErr.Error()))
-			return
-		}
-		unzipReader := bytes.NewReader(unzipData)
+		if fileSize > UNZIP_CACHE_FILE_ITEM_THRESHOLD {
+			zipFileItemCacheFname := utils.Md5Hex(fmt.Sprintf("%s:%s:%d", req.Src.Url, fileName, time.Now().Unix()))
+			zipFileItemCacheFpath := filepath.Join(os.TempDir(), zipFileItemCacheFname)
+			zipFileItemCacheFh, openErr := os.Create(zipFileItemCacheFpath)
+			defer os.Remove(zipFileItemCacheFpath)
 
-		//save file to bucket
-		fileName = prefix + fileName
-		if overwrite {
-			policy.Scope = bucket + ":" + fileName
-		}
-		uptoken := policy.Token(this.mac)
-		var unzipFile UnzipFile
-		unzipFile.Key = fileName
+			if openErr != nil {
+				err = fmt.Errorf("open local cache file item failed, %s", openErr.Error())
+				return
+			}
 
-		//incr counter
-		uploadCounter += 1
+			_, cpErr := io.Copy(zipFileItemCacheFh, zipFileReader)
+			if cpErr != nil {
+				err = fmt.Errorf("write local cache file item failed, %s", cpErr.Error())
+				zipFileItemCacheFh.Close()
+				return
+			}
+			zipFileItemCacheFh.Close()
+			zipFileReader.Close()
 
-		if uploadCounter%MAX_UPLOAD_WORKERS == 0 {
-			uploadWg.Wait()
-		}
-
-		uploadWg.Add(1)
-
-		go func() {
-			defer uploadWg.Done()
-			if fileSize <= rputThreshold {
+			if fileSize <= RESUMABLE_PUT_THRESHOLD {
+				log.Infof("[%s] start to fput file %s", req.ReqId, fileName)
 				var fputRet fio.PutRet
-				fErr := fio.Put(nil, &fputRet, uptoken, fileName, unzipReader, nil)
+				fErr := fio.PutFile(nil, &fputRet, uptoken, fileKey, zipFileItemCacheFpath, nil)
 				if fErr != nil {
-					unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", fErr.Error())
+					if v, ok := fErr.(*rpc.ErrorInfo); ok {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", v.Err)
+					} else {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", fErr.Error())
+					}
 				} else {
 					unzipFile.Hash = fputRet.Hash
 				}
-
+				log.Infof("[%s] end fput file %s", req.ReqId, fileName)
 			} else {
+				log.Infof("[%s] start to rput file %s", req.ReqId, fileName)
 				var rputRet rio.PutRet
-				rErr := rio.Put(nil, &rputRet, uptoken, fileName, unzipReader, int64(fileSize), nil)
+				rErr := rio.PutFile(nil, &rputRet, uptoken, fileKey, zipFileItemCacheFpath, nil)
 				if rErr != nil {
-					unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", rErr.Error())
+					if v, ok := rErr.(*rpc.ErrorInfo); ok {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", v.Err)
+					} else {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", rErr.Error())
+					}
 				} else {
 					unzipFile.Hash = rputRet.Hash
 				}
+				log.Infof("[%s] end rput file %s", req.ReqId, fileName)
 			}
 
-			resultLock.Lock()
-			unzipResult.Files = append(unzipResult.Files, unzipFile)
-			resultLock.Unlock()
-		}()
+		} else {
+			unzipData, unzipErr := ioutil.ReadAll(zipFileReader)
+			if unzipErr != nil {
+				err = errors.New(fmt.Sprintf("unzip the file content failed, %s", unzipErr.Error()))
+				zipFileReader.Close()
+				return
+			}
+			zipFileReader.Close()
+			unzipReader := bytes.NewReader(unzipData)
+
+			if fileSize <= RESUMABLE_PUT_THRESHOLD {
+				log.Infof("[%s] start to fput bytes %s", req.ReqId, fileName)
+				var fputRet fio.PutRet
+				fErr := fio.Put(nil, &fputRet, uptoken, fileKey, unzipReader, nil)
+				if fErr != nil {
+					if v, ok := fErr.(*rpc.ErrorInfo); ok {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", v.Err)
+					} else {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", fErr.Error())
+					}
+				} else {
+					unzipFile.Hash = fputRet.Hash
+				}
+				log.Infof("[%s] end fput bytes %s", req.ReqId, fileName)
+			} else {
+				log.Infof("[%s] start to rput bytes %s", req.ReqId, fileName)
+				var rputRet rio.PutRet
+				rErr := rio.Put(nil, &rputRet, uptoken, fileKey, unzipReader, int64(fileSize), nil)
+				if rErr != nil {
+					if v, ok := rErr.(*rpc.ErrorInfo); ok {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", v.Err)
+					} else {
+						unzipFile.Error = fmt.Sprintf("save unzip file to bucket error, %s", rErr.Error())
+					}
+				} else {
+					unzipFile.Hash = rputRet.Hash
+				}
+				log.Infof("[%s] end rput bytes %s", req.ReqId, fileName)
+			}
+		}
+
+		unzipResult.Files = append(unzipResult.Files, unzipFile)
 	}
 
-	uploadWg.Wait()
 	log.Infof("[%s] upload files done", req.ReqId)
 	//write result
 	result = unzipResult
