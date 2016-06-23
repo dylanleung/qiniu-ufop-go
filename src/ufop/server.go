@@ -131,7 +131,16 @@ func handleJob(ufopReq UfopRequest, ufopPrefix string, jobHandlers map[string]Uf
 func writeJsonError(w http.ResponseWriter, statusCode int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	io.WriteString(w, fmt.Sprintf(`{"error":"%s"}`, message))
+	respErr := struct {
+		Error string `json:"error"`
+	}{
+		Error: message,
+	}
+	respErrBytes, _ := json.Marshal(&respErr)
+	_, err := w.Write(respErrBytes)
+	if err != nil {
+		log.Error("write error error", err)
+	}
 }
 
 func writeJsonResult(w http.ResponseWriter, statusCode int, result interface{}) {
